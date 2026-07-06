@@ -54,14 +54,19 @@ All three variants always disclose that the result comes from automated signals 
 
 ## 4. Appeals Workflow
 
-- **Who can appeal:** Anyone who received a submission result. `/submit` requires a `contact` field (email); this is stored with the submission so a reviewer can follow up, and appeals must reference a valid `submission_id`.
-- **What they provide:** `submission_id`, `contact` (must match or supplement the original), and a free-text `reason` explaining why the label is disputed.
-- **What happens on appeal:**
-  1. System looks up the submission by `submission_id`. If not found → 404.
-  2. Submission status is set to `appeal_pending`. The original label and confidence score are **not** hidden or changed — they remain visible, now annotated as under dispute.
-  3. An audit log entry is written: `{event: "appeal_filed", submission_id, contact, reason, timestamp}`.
-  4. Response confirms receipt: `{status: "appeal_pending", submission_id, message: "Your appeal has been received and will be reviewed."}`.
-- **Reviewer queue (`GET /appeals`):** A human reviewer sees a list of all submissions with `status == "appeal_pending"`, each showing: original text snippet, original label, confidence, both signals' individual outputs, the appeal reason, and contact. The reviewer resolves via `POST /appeals/{submission_id}/resolve` with `{decision: "upheld"|"overturned", notes}`, which updates status to `resolved_upheld` or `resolved_overturned` and logs the resolution with timestamp and notes.
+> **Note (post-M5):** the version below reflects what was actually implemented in
+> Milestone 5, which follows the assignment's simpler contract rather than the
+> richer reviewer-queue design originally sketched here (`contact`/`reason`/
+> `appeal_pending`/`GET /appeals`/`/appeals/{id}/resolve`). See "Spec Reflection"
+> in README.md for why this diverged.
+
+- **Who can appeal:** Anyone who holds the `content_id` returned by `/submit`. No account system — `content_id` (a UUID) is the sole reference to the disputed submission.
+- **What they provide:** `content_id` and a free-text `creator_reasoning` explaining why the label is disputed (e.g., "I wrote this myself; I'm a non-native English speaker and my style reads as more formal than typical").
+- **What happens on appeal (`POST /appeal`):**
+  1. System looks up the submission by `content_id`. If not found → 404.
+  2. The **same audit row** is updated in place: `status` is set to `under_review`, `appeal_reasoning` and `appealed_at` are recorded. The original label, confidence, and both signal outputs are **not** hidden or changed — they remain fully visible, now flagged as disputed.
+  3. Response confirms receipt: `{status: "under_review", content_id, message, original_attribution, original_confidence}`.
+- **Reviewer visibility:** Because the appeal updates the original row rather than creating a separate record, a human reviewer can find every disputed submission via `GET /log` by filtering for `status == "under_review"` — each entry already shows the text snippet, original label, confidence, both individual signal scores, and the appeal reasoning side by side. Automated re-classification and a dedicated resolve/decision endpoint are explicitly out of scope for this milestone; a human reviews and acts on the `under_review` rows outside the API.
 
 ## 5. Anticipated Edge Cases
 
@@ -102,46 +107,36 @@ Response to client
   { submission_id, prediction, confidence, label, signals[], text_length }
 ```
 
-### Appeal flow
+### Appeal flow (as implemented — see note in §4)
 ```
 Client
-  │  POST /appeal { submission_id, contact, reason }
+  │  POST /appeal { content_id, creator_reasoning }
   ▼
 Flask app
-  │  lookup submission_id
+  │  lookup content_id
   ▼
-Status update: submitted → appeal_pending
-  │  (label/confidence unchanged, flagged as disputed)
+Status update: classified → under_review
+  │  (label/confidence unchanged, flagged as disputed — same audit row)
   ▼
-Audit log
-  │  event=appeal_filed, submission_id, contact, reason, timestamp
+Audit log (row updated in place)
+  │  appeal_reasoning, appealed_at recorded alongside original signals/label
   ▼
 Response to client
-  { status: "appeal_pending", submission_id, message }
+  { status: "under_review", content_id, message, original_attribution, original_confidence }
 
-  ... later, human reviewer ...
-
-GET /appeals  ──► list of all appeal_pending submissions (full signal detail + reason)
-  │
-POST /appeals/{id}/resolve { decision, notes }
-  ▼
-Status update: appeal_pending → resolved_upheld | resolved_overturned
-  ▼
-Audit log: event=appeal_resolved, decision, notes, timestamp
+  ... later, human reviewer reads GET /log filtering status == "under_review" ...
 ```
 
-A submitted text always passes through **both** signals independently before scoring — neither signal short-circuits the other — so the combined score always reflects two genuinely distinct measurements. An appeal never mutates the original signal outputs or label; it only adds status and a parallel audit trail, so the original automated assessment remains fully reconstructable even after a human overturns it.
+A submitted text always passes through **both** signals independently before scoring — neither signal short-circuits the other — so the combined score always reflects two genuinely distinct measurements. An appeal never mutates the original signal outputs or label; it only adds status and reasoning to the same row, so the original automated assessment remains fully reconstructable even after a human reviews it.
 
-## API Surface (Contract)
+## API Surface (Contract — as implemented)
 
 | Endpoint | Method | Request body | Response |
 |---|---|---|---|
-| `/submit` | POST | `{text, contact}` | `{submission_id, prediction, confidence, label, signals[], text_length}` |
-| `/appeal` | POST | `{submission_id, contact, reason}` | `{status, submission_id, message}` |
-| `/appeals` | GET | — | `{count, entries: [{submission_id, text_snippet, label, confidence, signals, reason, contact}]}` |
-| `/appeals/{id}/resolve` | POST | `{decision, notes}` | `{submission_id, status, resolved_at}` |
-| `/logs` | GET | — | `{count, entries[]}` (existing) |
-| `/health` | GET | — | `{status: "ok"}` (existing) |
+| `/submit` | POST | `{text, creator_id}` | `{content_id, creator_id, prediction, attribution, confidence, label, signals[], text_length}` |
+| `/appeal` | POST | `{content_id, creator_reasoning}` | `{status, content_id, message, original_attribution, original_confidence}` |
+| `/log` | GET | — | `{count, entries[]}` — includes `status` and, once appealed, `appeal_reasoning`/`appealed_at` |
+| `/health` | GET | — | `{status: "ok"}` |
 
 ## AI Tool Plan
 
@@ -156,6 +151,6 @@ A submitted text always passes through **both** signals independently before sco
 - **Verification:** Run both signals + the combiner on the same 3 test inputs from M3 and confirm: (a) scores differ meaningfully between the clearly-AI and clearly-human samples (not clustered near 0.5), and (b) the ambiguous sample lands in the 0.40–0.60 "Uncertain" band rather than being forced to a side.
 
 **M5 — Production layer (labels + appeals)**
-- **Spec sections provided:** Transparency Label Design §3 + Appeals Workflow §4 + Architecture diagram (appeal flow) + API Surface rows for `/appeal`, `/appeals`, `/appeals/{id}/resolve`.
-- **What I'll ask for:** The label-generation function (mapping `combined` + band to exact label text from §3) and the `/appeal`, `/appeals`, `/appeals/{id}/resolve` endpoints with SQLite status tracking.
-- **Verification:** Manually submit texts engineered to land in each of the 3 confidence bands and confirm the exact label text matches §3 for all three; then file an appeal against one submission and confirm its status flips to `appeal_pending` in `/appeals`, and that resolving it updates status and is reflected in the audit log.
+- **Spec sections provided:** Transparency Label Design §3 + Appeals Workflow §4 + Architecture diagram (appeal flow) + API Surface row for `/appeal`.
+- **What I'll ask for:** The label-generation function (mapping `combined` + band to exact label text from §3) and the `/appeal` endpoint with SQLite status tracking.
+- **Verification:** Manually submit texts engineered to land in each of the 3 confidence bands and confirm the exact label text matches §3 for all three; then file an appeal against one submission (using its `content_id`) and confirm its status flips to `under_review` in `GET /log`, with `appeal_reasoning` populated on the same row as the original signals and label.
