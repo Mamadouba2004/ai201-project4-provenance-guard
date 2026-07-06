@@ -3,6 +3,7 @@ app.py — Provenance Guard: AI text-provenance detection API.
 
 Endpoints:
   POST /submit      — submit text for AI-provenance classification
+  POST /appeal      — appeal a classification decision
   GET  /health      — liveness check
   GET  /log         — view recent audit entries
 """
@@ -15,7 +16,7 @@ from flask_limiter.util import get_remote_address
 from dotenv import load_dotenv
 
 from detector import analyze_text
-from audit import log_request, get_recent_logs
+from audit import log_request, get_recent_logs, get_by_content_id, log_appeal
 
 load_dotenv()
 
@@ -34,7 +35,7 @@ limiter = Limiter(
 # ---------------------------------------------------------------------------
 
 @app.route("/submit", methods=["POST"])
-@limiter.limit("10 per minute")
+@limiter.limit("10 per minute;100 per day")
 def submit():
     """
     Submit text for AI-provenance classification.
@@ -76,6 +77,48 @@ def submit():
         "content_id": content_id,
         "creator_id": creator_id,
         **result,
+    }), 200
+
+
+@app.route("/appeal", methods=["POST"])
+@limiter.limit("10 per minute;100 per day")
+def appeal():
+    """
+    Appeal a classification decision.
+
+    Request body (JSON):
+      { "content_id": "<uuid from /submit>", "creator_reasoning": "<why>" }
+
+    On success: the original submission's status flips to 'under_review',
+    the reasoning is recorded in the audit log, and a confirmation is
+    returned. Automated re-classification is intentionally out of scope —
+    a human reviewer picks it up from the 'under_review' queue.
+    """
+    data = request.get_json(silent=True)
+
+    if not data or "content_id" not in data or "creator_reasoning" not in data:
+        return jsonify({
+            "error": "Request body must be JSON with 'content_id' and 'creator_reasoning' fields."
+        }), 400
+
+    content_id = data["content_id"]
+    creator_reasoning = data["creator_reasoning"].strip()
+
+    if not creator_reasoning:
+        return jsonify({"error": "creator_reasoning must not be empty."}), 400
+
+    original = get_by_content_id(content_id)
+    if original is None:
+        return jsonify({"error": f"No submission found for content_id '{content_id}'."}), 404
+
+    log_appeal(content_id, creator_reasoning)
+
+    return jsonify({
+        "status": "under_review",
+        "content_id": content_id,
+        "message": "Your appeal has been received and the classification is now under review.",
+        "original_attribution": original["attribution"],
+        "original_confidence": original["confidence"],
     }), 200
 
 
