@@ -163,6 +163,46 @@ def _stylometric_signal(text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Transparency labels (planning.md §3) — mapped from combined "p_human" score
+# ---------------------------------------------------------------------------
+
+def _label_for(combined: float) -> dict:
+    """
+    Map a combined p_human score in [0, 1] to one of three transparency-label
+    bands, per planning.md §2-3:
+        0.00-0.40  -> Likely AI-generated
+        0.40-0.60  -> Uncertain
+        0.60-1.00  -> Likely human-written
+    """
+    if combined <= 0.40:
+        p_ai = 1.0 - combined
+        return {
+            "attribution": "likely_ai",
+            "text": (
+                f"This text is likely AI-generated (confidence: {p_ai:.0%}). "
+                "This assessment is based on automated signals and may be "
+                "incorrect — see our appeals process if you believe this is wrong."
+            ),
+        }
+    if combined >= 0.60:
+        return {
+            "attribution": "likely_human",
+            "text": (
+                f"This text is likely human-written (confidence: {combined:.0%}). "
+                "This assessment is based on automated signals and may be incorrect."
+            ),
+        }
+    return {
+        "attribution": "uncertain",
+        "text": (
+            f"This text's origin could not be reliably determined "
+            f"(confidence: {combined:.0%}). Automated signals were inconclusive — "
+            "treat this result as inconclusive, not as evidence of AI use."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Ensemble: combine both signals into a final verdict
 # ---------------------------------------------------------------------------
 
@@ -183,10 +223,16 @@ def analyze_text(text: str) -> dict:
     combined = 0.60 * llm_human_p + 0.40 * sty_human_p
     final_prediction = "human" if combined >= 0.50 else "ai"
     final_confidence = combined if final_prediction == "human" else 1.0 - combined
+    label = _label_for(combined)
 
     return {
         "prediction": final_prediction,
         "confidence": round(final_confidence, 3),
+        "combined_score": round(combined, 3),
+        "attribution": label["attribution"],
+        "label": label["text"],
         "signals": [llm, style],
+        "llm_score": llm_human_p,
+        "stylometric_score": sty_human_p,
         "text_length": len(text),
     }

@@ -2,10 +2,12 @@
 app.py — Provenance Guard: AI text-provenance detection API.
 
 Endpoints:
-  POST /analyze     — detect whether text is human or AI-generated
+  POST /submit      — submit text for AI-provenance classification
   GET  /health      — liveness check
-  GET  /logs        — view recent audit entries
+  GET  /log         — view recent audit entries
 """
+
+import uuid
 
 from flask import Flask, request, jsonify
 from flask_limiter import Limiter
@@ -31,19 +33,23 @@ limiter = Limiter(
 # Routes
 # ---------------------------------------------------------------------------
 
-@app.route("/analyze", methods=["POST"])
+@app.route("/submit", methods=["POST"])
 @limiter.limit("10 per minute")
-def analyze():
+def submit():
     """
-    Analyze submitted text for AI provenance.
+    Submit text for AI-provenance classification.
 
     Request body (JSON):
-      { "text": "<text to analyze>" }
+      { "text": "<text to analyze>", "creator_id": "<submitter id>" }
 
     Response (JSON):
       {
+        "content_id": "<uuid>",
+        "creator_id": "<submitter id>",
         "prediction": "human" | "ai",
-        "confidence": 0.0–1.0,
+        "attribution": "likely_ai" | "uncertain" | "likely_human",
+        "confidence": 0.0-1.0,
+        "label": "<transparency label text>",
         "signals": [ { signal details }, ... ],
         "text_length": <int>
       }
@@ -54,6 +60,7 @@ def analyze():
         return jsonify({"error": "Request body must be JSON with a 'text' field."}), 400
 
     text = data["text"].strip()
+    creator_id = data.get("creator_id", "anonymous")
 
     if len(text) < 30:
         return jsonify({"error": "Text is too short for reliable analysis (min 30 chars)."}), 400
@@ -61,10 +68,15 @@ def analyze():
     if len(text) > 10_000:
         return jsonify({"error": "Text exceeds maximum length of 10,000 characters."}), 400
 
+    content_id = str(uuid.uuid4())
     result = analyze_text(text)
-    log_request(text, result)
+    log_request(content_id, creator_id, text, result)
 
-    return jsonify(result), 200
+    return jsonify({
+        "content_id": content_id,
+        "creator_id": creator_id,
+        **result,
+    }), 200
 
 
 @app.route("/health", methods=["GET"])
@@ -73,9 +85,9 @@ def health():
     return jsonify({"status": "ok"}), 200
 
 
-@app.route("/logs", methods=["GET"])
-def logs():
-    """Return the 20 most recent audit entries."""
+@app.route("/log", methods=["GET"])
+def log():
+    """Return the most recent audit entries."""
     limit = request.args.get("limit", 20, type=int)
     entries = get_recent_logs(limit=min(limit, 100))
     return jsonify({"count": len(entries), "entries": entries}), 200
